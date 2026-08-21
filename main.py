@@ -23,7 +23,7 @@ import time
 from dotenv import load_dotenv
 
 import auth
-from source_client import RampClient, PersistentFailure, answers_by_question
+from source_client import RampClient, PersistentFailure, answers_by_question, format_feedback_text
 from sheets_sync import SheetsSync, normalize_row, SCHEMA_COLUMNS
 
 
@@ -60,13 +60,10 @@ def scrape_event(client: RampClient, event: dict, errors: list) -> list:
     and returns whatever rows it managed to build rather than raising, so a
     problem with one event never stops the run.
 
-    One row per (respondent, question) — a respondent who answered 10
-    questions produces 10 rows, each with that question's own text next to
-    their own answer, rather than one row with everything mashed together
-    (see sheets_sync.SCHEMA_COLUMNS). A respondent who answered nothing
-    (missing enrollment id, or a detail call that returned no answers)
-    still gets exactly one row with a blank Question/Rating, so the sheet
-    still reflects that they were on the feedback roster.
+    One row per respondent — every question they answered becomes one
+    "Question: Answer" line inside that row's single Feedback cell
+    (source_client.format_feedback_text), rather than one flattened
+    semicolon-joined paragraph or a separate row per question.
     """
     event_id = event.get("eventId") or event.get("uniqueEventId") or "?"
     unique_event_id = event.get("uniqueEventId")
@@ -89,21 +86,18 @@ def scrape_event(client: RampClient, event: dict, errors: list) -> list:
         if not enrollment_id:
             # No enrollment id to look up the detailed answers with — still
             # emit what we know rather than dropping the row.
-            rows.append(normalize_row(event, resp, "", ""))
+            rows.append(normalize_row(event, resp, ""))
             continue
 
         try:
             detail = client.get_feedback_detail(udyam, resp_event_id, enrollment_id)
             qa_pairs = answers_by_question(detail["questions"], detail["feedback_answer"])
+            feedback_text = format_feedback_text(qa_pairs)
         except PersistentFailure as e:
             errors.append(f"Event {event_id}, respondent {udyam or enrollment_id}: {e}")
-            qa_pairs = []
+            feedback_text = ""
 
-        if qa_pairs:
-            for question_text, answer_text in qa_pairs:
-                rows.append(normalize_row(event, resp, question_text, answer_text))
-        else:
-            rows.append(normalize_row(event, resp, "", ""))
+        rows.append(normalize_row(event, resp, feedback_text))
 
     return rows
 

@@ -236,14 +236,11 @@ def answers_by_question(questions: list[dict], feedback_answer: dict | None) -> 
     answered, in the form's own question order.
 
     The portal's feedback forms are multi-question (Text/Radio/Dropdown/
-    Checkbox per createDynamicForm in the app bundle) — this used to be
-    joined into one flattened text blob per respondent, which read as an
-    unreadable wall of "Question: answer; Question: answer; ..." in a
-    single Sheets cell, and only captured a "Rating" when a form happened
-    to use the word-scale (Excellent/Good/...) vocabulary rather than the
-    numeric 1-5 scale most of these forms actually use. Returning each
-    question separately instead lets the caller emit one Question/Rating
-    row per question, matching the sheet's own columns.
+    Checkbox per createDynamicForm in the app bundle). Returning each
+    question separately (rather than joining them ad hoc at the call
+    site) keeps the pairing logic — including the Checkbox-options
+    handling below — in one place regardless of how the caller ultimately
+    serializes it (see format_feedback_text).
     """
     if not feedback_answer:
         return []
@@ -264,3 +261,26 @@ def answers_by_question(questions: list[dict], feedback_answer: dict | None) -> 
         if answer_text:
             pairs.append((q["questionText"], answer_text))
     return pairs
+
+
+FEEDBACK_CHAR_LIMIT = 45000
+
+
+def format_feedback_text(pairs: list[tuple[str, str]]) -> str:
+    """Join (question, answer) pairs into one newline-separated block —
+    one "Question: Answer" line per question — for the sheet's single
+    Feedback cell. Newline-separated rather than the original "; "
+    semicolon join: with Sheets' wrap-text formatting on, each question
+    lands on its own visual line instead of one unreadable run-on
+    paragraph.
+
+    Truncated defensively: this lands directly in a Sheets cell
+    (50,000-char hard limit), and a form with many questions or an
+    unusually long free-text answer shouldn't be able to crash the write
+    the way an unbounded join elsewhere in this project already has (see
+    sheets_sync.write_run_log).
+    """
+    text = "\n".join(f"{q}: {a}" for q, a in pairs)
+    if len(text) > FEEDBACK_CHAR_LIMIT:
+        text = text[:FEEDBACK_CHAR_LIMIT] + f"… [truncated, {len(text)} chars total]"
+    return text

@@ -76,12 +76,11 @@ def build_week_summary(client: RampClient, week_events: list, errors: list):
 
     Returns (summary_events, feedback_rows): summary_events carries the
     per-event enrolled/attended/feedback counts for the stat cards;
-    feedback_rows is the flat list of individual (respondent, question)
-    rows that actually have an answer — scrape_event now emits one row per
-    question a respondent answered (see sheets_sync.SCHEMA_COLUMNS), so
-    "how many people gave feedback" is a count of distinct respondents
-    within these rows, not a count of rows. render_email groups these back
-    into one card per person.
+    feedback_rows is the flat list of individual respondent rows that
+    actually contain feedback — one per person, for the per-feedback
+    cards in the email. A respondent who's merely on the feedback roster
+    with nothing filled in doesn't count as "gave feedback" and isn't
+    listed.
     """
     summary = []
     feedback_rows = []
@@ -89,9 +88,8 @@ def build_week_summary(client: RampClient, week_events: list, errors: list):
         event_id = event.get("eventId") or event.get("uniqueEventId") or "?"
         guid = event.get("uniqueEventId")
         rows = scrape_event(client, event, errors)
-        given_rows = [r for r in rows if r["Question"].strip() and r["Rating"].strip()]
+        given_rows = [r for r in rows if r["Feedback"].strip()]
         feedback_rows.extend(given_rows)
-        respondents_who_gave_feedback = {r.get("Enrollment ID") or r.get("Name") for r in given_rows}
 
         enrolled = attended = None
         if guid:
@@ -111,7 +109,7 @@ def build_week_summary(client: RampClient, week_events: list, errors: list):
             "eventDate": event.get("eventDate", ""),
             "enrolled": enrolled,
             "attended": attended,
-            "feedbackCount": len(respondents_who_gave_feedback),
+            "feedbackCount": len(given_rows),
         })
     return summary, feedback_rows
 
@@ -166,40 +164,18 @@ def event_header_html(ev: dict) -> str:
     </table>"""
 
 
-def group_by_respondent(rows: list) -> list:
-    """Fold scrape_event's one-row-per-question rows back into one entry
-    per person: {"name", "eventId", "answers": [(question, rating), ...]}
-    in original order, so the email can show one card per respondent
-    (matching the sheet's own grouping by Enrollment ID, falling back to
-    Name when it's missing)."""
-    people = {}
-    order = []
-    for r in rows:
-        key = (r.get("Event ID"), r.get("Enrollment ID") or r.get("Name"))
-        if key not in people:
-            people[key] = {"name": r.get("Name") or "Anonymous", "eventId": r.get("Event ID"), "answers": []}
-            order.append(key)
-        people[key]["answers"].append((r["Question"], r["Rating"]))
-    return [people[k] for k in order]
-
-
-def person_card_html(person: dict) -> str:
-    """One card per person who gave feedback: their name, then a
-    Question (left) / Rating (right) row for every question they
-    answered — mirrors the sheet's own Question/Rating columns."""
-    qa_rows = "".join(
-        f'<tr>'
-        f'<td style="padding:5px 10px 5px 0;font-size:12px;color:{INK_2};font-family:Arial,Helvetica,sans-serif;'
-        f'vertical-align:top;border-bottom:1px solid {BORDER};">{esc(q)}</td>'
-        f'<td style="padding:5px 0;font-size:12px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;'
-        f'text-align:right;white-space:nowrap;vertical-align:top;border-bottom:1px solid {BORDER};">{esc(a)}</td>'
-        f'</tr>'
-        for q, a in person["answers"]
-    )
+def feedback_card_html(row: dict) -> str:
+    """One card per person who actually gave feedback: their name, then
+    their Feedback text as-is — same newline-per-question content as the
+    sheet's own Feedback cell, so the email and the sheet read the same
+    way. white-space:pre-line renders those newlines as real line breaks
+    without needing to re-parse "Question: Answer" back apart."""
+    name = esc(row.get("Name") or "Anonymous")
+    feedback_text = esc(row.get("Feedback") or "(no written feedback)")
     return f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {BORDER};border-radius:8px;background:#fcfcfb;margin-bottom:8px;">
       <tr><td style="padding:12px 16px;">
-        <div style="font-size:13px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;margin-bottom:6px;">{esc(person['name'])}</div>
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{qa_rows}</table>
+        <div style="font-size:13px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;margin-bottom:6px;">{name}</div>
+        <div style="font-size:12px;color:{INK_2};line-height:1.6;font-family:Arial,Helvetica,sans-serif;white-space:pre-line;">{feedback_text}</div>
       </td></tr>
     </table>"""
 
@@ -212,8 +188,8 @@ def no_feedback_note_html() -> str:
     )
 
 
-def event_section_html(ev: dict, people_for_event: list) -> str:
-    cards = "".join(person_card_html(p) for p in people_for_event) or no_feedback_note_html()
+def event_section_html(ev: dict, rows_for_event: list) -> str:
+    cards = "".join(feedback_card_html(r) for r in rows_for_event) or no_feedback_note_html()
     return f'<div style="margin-bottom:20px;">{event_header_html(ev)}{cards}</div>'
 
 
@@ -222,8 +198,7 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
     total_enrolled = sum(e["enrolled"] for e in summary_events if e["enrolled"] is not None)
     total_attended = sum(e["attended"] for e in summary_events if e["attended"] is not None)
 
-    people = group_by_respondent(feedback_rows)
-    total_feedback = len(people)
+    total_feedback = len(feedback_rows)
 
     cards_html = "".join([
         stat_card_html(month_label, "Month"),
@@ -233,15 +208,15 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
         stat_card_html(fmt_count(total_feedback), "Gave Feedback"),
     ])
 
-    people_by_event = {}
-    for p in people:
-        people_by_event.setdefault(p["eventId"], []).append(p)
-    for plist in people_by_event.values():
-        plist.sort(key=lambda p: p["name"])
+    rows_by_event = {}
+    for r in feedback_rows:
+        rows_by_event.setdefault(r.get("Event ID", ""), []).append(r)
+    for rows in rows_by_event.values():
+        rows.sort(key=lambda r: r.get("Name", ""))
 
     events_sorted = sorted(summary_events, key=lambda e: e["eventDate"])
     events_html = "".join(
-        event_section_html(ev, people_by_event.get(ev["eventId"], [])) for ev in events_sorted
+        event_section_html(ev, rows_by_event.get(ev["eventId"], [])) for ev in events_sorted
     ) or (
         f'<p style="padding:20px;text-align:center;color:{MUTED};'
         f'font-family:Arial,Helvetica,sans-serif;font-size:13px;margin:0;border:1px solid {BORDER};'
@@ -302,11 +277,11 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
             f"{fmt_count(ev['enrolled'])} enrolled, {fmt_count(ev['attended'])} attended, "
             f"{ev['feedbackCount']} feedback =="
         )
-        for p in people_by_event.get(ev["eventId"], []):
-            plain_lines.append(f"  - {p['name']}:")
-            for q, a in p["answers"]:
-                plain_lines.append(f"      {q}: {a}")
-        if not people_by_event.get(ev["eventId"]):
+        for r in rows_by_event.get(ev["eventId"], []):
+            plain_lines.append(f"  - {r.get('Name') or 'Anonymous'}:")
+            for line in (r.get("Feedback") or "").split("\n"):
+                plain_lines.append(f"      {line}")
+        if not rows_by_event.get(ev["eventId"]):
             plain_lines.append("  (no feedback received for this event yet)")
     if not events_sorted:
         plain_lines.append("No events fell in this window.")

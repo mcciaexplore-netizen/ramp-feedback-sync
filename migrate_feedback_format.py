@@ -1,13 +1,14 @@
 """
 One-time migration: re-scrapes every event's feedback fresh and writes it
-into NEW worksheets in the Question/Rating format (one row per respondent
-per question — see sheets_sync.SCHEMA_COLUMNS), leaving the existing
-month tabs (with the old flattened Feedback/Rating format) untouched.
+into NEW worksheets with the newline-separated Feedback format (one
+"Question: Answer" line per question inside a single Feedback cell — see
+sheets_sync.SCHEMA_COLUMNS), leaving the existing month tabs (with the
+old semicolon-flattened Feedback/Rating format) untouched.
 
 Why a fresh re-scrape rather than reformatting what's already in the
 sheet: the per-question breakdown was never stored anywhere — the old
-pipeline flattened every question's answer into one "Feedback" string the
-moment it was scraped and discarded the structured form, so there's
+pipeline flattened every question's answer into one "; "-joined string
+the moment it was scraped and discarded the structured form, so there's
 nothing to reformat in place. This has to go back to the live RAMP API.
 
 Why new tabs instead of clearing the existing ones: this sheet is shared
@@ -21,9 +22,9 @@ incremental sync (main.py / weekly_report.py) and has nothing to do with
 this one-time migration, so it's neither read nor written here.
 
 Run once:
-    python migrate_to_qna_format.py
+    python migrate_feedback_format.py
 Or against a handful of events first, to sanity-check the output:
-    python migrate_to_qna_format.py --limit-events 5
+    python migrate_feedback_format.py --limit-events 5
 """
 
 import argparse
@@ -43,7 +44,7 @@ MONTH_SUFFIX = " (v2)"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate feedback to the Question/Rating format in new tabs")
+    parser = argparse.ArgumentParser(description="Migrate feedback to the newline-separated Feedback format in new tabs")
     parser.add_argument("--limit-events", type=int, default=None, help="Only process the first N events (sanity check)")
     args = parser.parse_args()
 
@@ -70,7 +71,7 @@ def main():
         events = client.get_all_events()
         if args.limit_events:
             events = events[: args.limit_events]
-        print(f"Re-scraping {len(events)} event(s) for the Question/Rating migration...")
+        print(f"Re-scraping {len(events)} event(s) for the Feedback-format migration...")
 
         rows_by_target_month = defaultdict(list)
         for i, event in enumerate(events, start=1):
@@ -97,7 +98,7 @@ def main():
     if errors:
         os.makedirs("output", exist_ok=True)
         with open("output/run.log", "a") as f:
-            f.write(f"\n=== Question/Rating migration ({len(errors)} errors) ===\n")
+            f.write(f"\n=== Feedback-format migration ({len(errors)} errors) ===\n")
             for e in errors:
                 f.write(f"{e}\n")
         print(f"{len(errors)} error(s) — details appended to output/run.log")
