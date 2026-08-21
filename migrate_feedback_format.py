@@ -1,21 +1,25 @@
 """
 One-time migration: re-scrapes every event's feedback fresh and writes it
-into NEW worksheets with the newline-separated Feedback format (one
-"Question: Answer" line per question inside a single Feedback cell — see
-sheets_sync.SCHEMA_COLUMNS), leaving the existing month tabs (with the
-old semicolon-flattened Feedback/Rating format) untouched.
+in the newline-separated Feedback format (one "Question: Answer" line per
+question inside a single Feedback cell — see sheets_sync.SCHEMA_COLUMNS).
 
-Why a fresh re-scrape rather than reformatting what's already in the
-sheet: the per-question breakdown was never stored anywhere — the old
-pipeline flattened every question's answer into one "; "-joined string
-the moment it was scraped and discarded the structured form, so there's
-nothing to reformat in place. This has to go back to the live RAMP API.
+Two modes, chosen by --in-place:
 
-Why new tabs instead of clearing the existing ones: this sheet is shared
-(MCCIA staff already reference it), and re-scraping ~160 events is a long
-enough run that something could go wrong partway through — safer to write
-into "<Month> (v2)" tabs you can review and compare, then delete the old
-tabs yourself once satisfied, than to wipe live data with no undo.
+- Default (safe): writes into NEW "<Month> (v2)" worksheets, leaving the
+  existing month tabs (old semicolon-flattened Feedback/Rating format)
+  completely untouched. Review the (v2) tabs, then delete the old ones
+  yourself (and drop the suffix if you want) once satisfied.
+- --in-place (destructive): clears each existing month tab and rewrites
+  it directly with the new format. No new tabs, no undo — this sheet is
+  shared (MCCIA staff already reference it), so this mode asks for a
+  typed confirmation before touching anything.
+
+Why a fresh re-scrape either way rather than reformatting what's already
+in the sheet: the per-question breakdown was never stored anywhere — the
+old pipeline flattened every question's answer into one "; "-joined
+string the moment it was scraped and discarded the structured form, so
+there's nothing to reformat in place. This has to go back to the live
+RAMP API.
 
 This ignores checkpoint.json on purpose — that file tracks the ongoing
 incremental sync (main.py / weekly_report.py) and has nothing to do with
@@ -25,6 +29,8 @@ Run once:
     python migrate_feedback_format.py
 Or against a handful of events first, to sanity-check the output:
     python migrate_feedback_format.py --limit-events 5
+Or to replace the existing tabs directly instead of writing new ones:
+    python migrate_feedback_format.py --in-place
 """
 
 import argparse
@@ -43,10 +49,29 @@ from source_client import RampClient
 MONTH_SUFFIX = " (v2)"
 
 
+def confirm_in_place() -> bool:
+    print(
+        "\n--in-place will CLEAR and REWRITE every existing month tab in the "
+        "live sheet with freshly re-scraped data. This cannot be undone from "
+        "within the sheet itself (the source data on RAMP is unaffected, but "
+        "whatever is currently in those tabs will be gone)."
+    )
+    answer = input("Type 'yes' to proceed: ").strip().lower()
+    return answer == "yes"
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Migrate feedback to the newline-separated Feedback format in new tabs")
+    parser = argparse.ArgumentParser(description="Migrate feedback to the newline-separated Feedback format")
     parser.add_argument("--limit-events", type=int, default=None, help="Only process the first N events (sanity check)")
+    parser.add_argument(
+        "--in-place", action="store_true",
+        help="Clear and rewrite the existing month tabs directly instead of writing new \"(v2)\" tabs",
+    )
     args = parser.parse_args()
+
+    if args.in_place and not confirm_in_place():
+        print("Aborted — nothing was changed.")
+        sys.exit(0)
 
     load_dotenv()
     login_timeout = int(os.getenv("LOGIN_TIMEOUT_SECONDS", "480"))
@@ -73,25 +98,37 @@ def main():
             events = events[: args.limit_events]
         print(f"Re-scraping {len(events)} event(s) for the Feedback-format migration...")
 
-        rows_by_target_month = defaultdict(list)
+        rows_by_month = defaultdict(list)
         for i, event in enumerate(events, start=1):
             event_id = event.get("eventId") or event.get("uniqueEventId") or "?"
             rows = scrape_event(client, event, errors)
             for row in rows:
-                target_month = (row["Month"] or "Unknown") + MONTH_SUFFIX
-                rows_by_target_month[target_month].append(row)
+                month = row["Month"] or "Unknown"
+                rows_by_month[month].append(row)
             elapsed = time.monotonic() - start
             remaining = (elapsed / i) * (len(events) - i)
             print(f"  [{i}/{len(events)}] {event_id}: {len(rows)} row(s) — ~{remaining/60:.1f} min remaining")
     finally:
         client.close()
 
-    print(f"\nWriting {sum(len(r) for r in rows_by_target_month.values())} row(s) across {len(rows_by_target_month)} new tab(s)...")
-    total_written = 0
-    for target_month, rows in rows_by_target_month.items():
-        written = sync.sync(rows)
-        total_written += written
-        print(f"  {target_month}: {written} row(s)")
+    total_rows = sum(len(r) for r in rows_by_month.values())
+    if args.in_place:
+        print(f"\nReplacing {len(rows_by_month)} existing tab(s) with {total_rows} freshly-scraped row(s)...")
+        total_written = 0
+        for month, rows in rows_by_month.items():
+            written = sync.replace_month(month, rows)
+            total_written += written
+            print(f"  {month}: {written} row(s)")
+    else:
+        print(f"\nWriting {total_rows} row(s) across {len(rows_by_month)} new tab(s)...")
+        total_written = 0
+        for month, rows in rows_by_month.items():
+            target_month = month + MONTH_SUFFIX
+            for row in rows:
+                row["Month"] = target_month
+            written = sync.sync(rows)
+            total_written += written
+            print(f"  {target_month}: {written} row(s)")
 
     elapsed_total = time.monotonic() - start
     print(f"\nDone in {elapsed_total/60:.1f} min. {total_written} row(s) written, {len(errors)} error(s).")
@@ -103,12 +140,15 @@ def main():
                 f.write(f"{e}\n")
         print(f"{len(errors)} error(s) — details appended to output/run.log")
 
-    print(
-        "\nReview the new \"<Month> (v2)\" tabs in the sheet. Once you're happy "
-        "with them, delete the old flattened-format tabs yourself (and rename "
-        "the (v2) tabs if you want to drop the suffix) — nothing here does "
-        "that automatically."
-    )
+    if args.in_place:
+        print("\nExisting month tabs have been replaced with the new Feedback format.")
+    else:
+        print(
+            "\nReview the new \"<Month> (v2)\" tabs in the sheet. Once you're happy "
+            "with them, delete the old flattened-format tabs yourself (and rename "
+            "the (v2) tabs if you want to drop the suffix), or re-run with "
+            "--in-place to replace them directly."
+        )
 
 
 if __name__ == "__main__":

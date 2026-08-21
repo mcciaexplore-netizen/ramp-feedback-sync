@@ -232,11 +232,32 @@ rows so it reads as a report rather than a raw dump.
 **Migrating pre-existing data:** if a month tab was populated before this
 newline-separated format existed, `python migrate_feedback_format.py`
 re-scrapes every event fresh (the old flattened format never stored the
-per-question breakdown, so there's nothing to reformat in place) and
-writes the result into new `"<Month> (v2)"` tabs alongside the originals —
-it does not touch or delete the old tabs. Review the new tabs, then delete
-the old ones (and drop the `(v2)` suffix if you want) once you're
-satisfied. This is a full re-scrape of every event, so expect it to take a
+per-question breakdown, so there's nothing to reformat in place). Two modes:
+
+```bash
+python migrate_feedback_format.py --limit-events 5
+```
+Sanity-check a handful of events first — writes into new `"<Month> (v2)"`
+tabs alongside the originals, touching nothing that already exists.
+
+```bash
+python migrate_feedback_format.py
+```
+Full run, still into `(v2)` tabs. Review them, then delete the old tabs
+yourself (and drop the `(v2)` suffix if you want) once satisfied.
+
+```bash
+python migrate_feedback_format.py --in-place
+```
+Clears and rewrites the *existing* month tabs directly instead of creating
+new ones — this is the one that actually changes the live May–Aug 2026
+tabs in place. Destructive and not undoable from within the sheet itself
+(the source data on RAMP is unaffected, but whatever's currently in those
+tabs is gone), so it asks for a typed `yes` confirmation before doing
+anything. Only use this after you've reviewed a `(v2)` run and trust the
+output.
+
+Either way this is a full re-scrape of every event, so expect it to take a
 while and to hit the RAMP API a lot — same rate limiting as everything
 else here.
 

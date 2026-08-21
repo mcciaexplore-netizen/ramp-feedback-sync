@@ -319,6 +319,29 @@ class SheetsSync:
             total_added += len(new_rows)
         return total_added
 
+    def replace_month(self, month: str, rows: list[dict]) -> int:
+        """Clear one worksheet and rewrite it from scratch with a fresh row
+        set — unlike sync(), which only appends rows not already present,
+        this discards whatever was already in that tab. Used only by the
+        one-time in-place format migration (migrate_feedback_format.py
+        --in-place), never by the ongoing incremental sync."""
+        ws = self._get_or_create(month)
+        _with_retry(ws.clear)
+        self._ensure_header(ws)
+
+        seen = set()
+        new_rows = []
+        for row in rows:
+            key = dedup_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            new_rows.append([row[c] for c in SCHEMA_COLUMNS])
+
+        if new_rows:
+            _with_retry(ws.append_rows, new_rows, value_input_option="USER_ENTERED")
+        return len(new_rows)
+
     def update_overview(self):
         """Refresh the Overview tab's per-month row counts. Cheap enough to
         call once at the end of a run rather than after every event."""
