@@ -5,6 +5,7 @@ not part of the scrape pipeline. Run after digest_gather.py.
 
 import html
 import json
+import os
 
 MONTHS = ["May 2026", "June 2026", "July 2026", "August 2026"]
 
@@ -166,7 +167,7 @@ def month_section(month, m):
 
 
 def main():
-    data = json.load(open("digest_data.json"))
+    data = json.load(open("output/digest_data.json"))
     months_data = data["months"]
 
     total_events = sum(m["totalEvents"] for m in months_data.values())
@@ -193,9 +194,10 @@ def main():
         error_note=error_note,
     )
 
-    with open("digest_report.html", "w") as f:
+    os.makedirs("output", exist_ok=True)
+    with open("output/digest_report.html", "w") as f:
         f.write(html_out)
-    print("Wrote digest_report.html")
+    print("Wrote output/digest_report.html")
 
 
 TEMPLATE = """<!doctype html>

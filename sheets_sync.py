@@ -12,6 +12,7 @@ holds run history, same as before.
 """
 
 import hashlib
+import os
 import re
 import time
 from collections import defaultdict
@@ -22,9 +23,14 @@ from dateutil import parser as dateparser
 from google.oauth2.service_account import Credentials
 
 # Event columns, then the MSME respondent's identity fields (as requested),
-# then the feedback itself. Rating and Scraped At close it out — without a
-# rating, a feedback row loses its at-a-glance signal, and Scraped At is the
-# only audit trail this sheet has.
+# then one Question/Rating pair per row. One row per (respondent, question)
+# rather than one row per respondent — these forms are multi-question
+# (10+ questions each), and a single "Feedback" cell holding every
+# question's answer joined into one paragraph was unreadable and lost the
+# per-question rating entirely (most forms use a numeric 1-5 scale, not
+# the word-scale the old single "Rating" column could recognize). This way
+# Question sits immediately left of its own Rating, one pair per row, and
+# every question's answer is visible and filterable/pivotable on its own.
 SCHEMA_COLUMNS = [
     "Event ID",
     "Component",
@@ -36,13 +42,13 @@ SCHEMA_COLUMNS = [
     "Mobile Number",
     "Email",
     "District",
-    "Feedback",
+    "Question",
     "Rating",
     "Scraped At",
 ]
 
-# (width in pixels) — narrow for short fields, wide for free text.
-COLUMN_WIDTHS = [110, 160, 220, 110, 100, 110, 160, 120, 200, 120, 420, 90, 170]
+# (width in pixels) — narrow for short fields, wide for the question text.
+COLUMN_WIDTHS = [110, 160, 220, 110, 100, 110, 160, 120, 200, 120, 380, 130, 170]
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -60,7 +66,7 @@ BAND_COLOR = {"red": 0.94, "green": 0.96, "blue": 1.0}  # very light blue
 # input to stay small.
 CELL_CHAR_LIMIT = 45000
 ERROR_SUMMARY_CHAR_LIMIT = 2000
-RUN_LOG_FILE = "run.log"
+RUN_LOG_FILE = "output/run.log"
 
 
 def _capped(text: str, limit: int) -> str:
@@ -122,8 +128,10 @@ def derive_month(event_date: str) -> str:
         return ""
 
 
-def normalize_row(event: dict, respondent: dict, feedback_text: str, rating: str) -> dict:
-    """Map one (event, respondent, feedback) triple onto the fixed schema.
+def normalize_row(event: dict, respondent: dict, question_text: str, answer_text: str) -> dict:
+    """Map one (event, respondent, question) triple onto the fixed schema —
+    one row per question a respondent answered, not one row per
+    respondent (see the SCHEMA_COLUMNS comment for why).
 
     Field provenance (see source_client.py docstring for confidence levels):
     - Event ID / Component / Event Name / Event Date: from the IA event
@@ -134,6 +142,8 @@ def normalize_row(event: dict, respondent: dict, feedback_text: str, rating: str
       per-event respondent list (industryassociation/viewfeedback) —
       fields confirmed via EventfeedbacklistComponent's own Excel-export
       mapping in the app bundle.
+    - Question / Rating: one question's text and that respondent's answer
+      to it, from source_client.answers_by_question.
     """
     event_id = event.get("eventId") or event.get("uniqueEventId") or ""
     component = event.get("componentName", "")
@@ -151,20 +161,22 @@ def normalize_row(event: dict, respondent: dict, feedback_text: str, rating: str
         "Mobile Number": respondent.get("ownersMobileNumber", ""),
         "Email": respondent.get("email", ""),
         "District": respondent.get("districtName", ""),
-        "Feedback": feedback_text,
-        "Rating": rating,
+        "Question": question_text,
+        "Rating": answer_text,
         "Scraped At": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def dedup_key(row: dict) -> str:
-    """Event ID + Enrollment ID is a genuinely unique key for one person's
-    one submission to one event — falls back to a hash of name+feedback
-    when Enrollment ID is missing (PROMPT.md's suggested fallback)."""
+    """Event ID + Enrollment ID + Question is a genuinely unique key for one
+    person's one answer to one question at one event — falls back to a hash
+    of name+question+answer when Enrollment ID is missing (PROMPT.md's
+    suggested fallback, extended with Question now that a person spans
+    multiple rows instead of just one)."""
     if row.get("Enrollment ID"):
-        basis = f"{row['Event ID']}|{row['Enrollment ID']}"
+        basis = f"{row['Event ID']}|{row['Enrollment ID']}|{row['Question']}"
     else:
-        basis = "|".join([str(row["Event ID"]), str(row["Name"]), str(row["Feedback"])])
+        basis = "|".join([str(row["Event ID"]), str(row["Name"]), str(row["Question"]), str(row["Rating"])])
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
@@ -222,9 +234,9 @@ class SheetsSync:
             "verticalAlignment": "MIDDLE",
         })
 
-        feedback_col = SCHEMA_COLUMNS.index("Feedback") + 1
-        feedback_col_letter = gspread.utils.rowcol_to_a1(1, feedback_col).rstrip("1")
-        _with_retry(ws.format, f"{feedback_col_letter}2:{feedback_col_letter}", {
+        question_col = SCHEMA_COLUMNS.index("Question") + 1
+        question_col_letter = gspread.utils.rowcol_to_a1(1, question_col).rstrip("1")
+        _with_retry(ws.format, f"{question_col_letter}2:{question_col_letter}", {
             "wrapStrategy": "WRAP",
             "verticalAlignment": "TOP",
         })
@@ -341,6 +353,7 @@ class SheetsSync:
 
         error_summary = ""
         if errors:
+            os.makedirs(os.path.dirname(RUN_LOG_FILE), exist_ok=True)
             with open(RUN_LOG_FILE, "a") as f:
                 f.write(f"\n=== Run at {timestamp} ({len(errors)} errors) ===\n")
                 for e in errors:

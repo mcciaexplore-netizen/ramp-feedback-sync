@@ -40,10 +40,6 @@ FEEDBACK_DETAIL_ENDPOINT = "msme/getmsmecustomfeedbackquestion"
 ENROLLED_ENDPOINT = "industryassociation/enrolledmsmelistforia"  # behind /viewEnrolledParticipants/:eventid
 ATTENDED_ENDPOINT = "industryassociation/attendedmsmelistforia"  # behind /viewAttendedParticipants/:eventid
 
-# Ratings vocabulary used by the portal's own aggregate report
-# (FeedbackSummaryComponent columns: excellent/good/neutral/poor/yes/no).
-RATING_VOCAB = {"excellent", "good", "neutral", "poor", "yes", "no"}
-
 
 class PersistentFailure(Exception):
     """Raised when a request fails after all retries are exhausted."""
@@ -235,20 +231,24 @@ class RampClient:
         return {"questions": questions, "feedback_answer": feedback_answer}
 
 
-def flatten_feedback(questions: list[dict], feedback_answer: dict | None) -> tuple[str, str]:
-    """Flatten a multi-question feedback form into (feedback_text, rating).
+def answers_by_question(questions: list[dict], feedback_answer: dict | None) -> list[tuple[str, str]]:
+    """One (question_text, answer_text) pair per question actually
+    answered, in the form's own question order.
 
     The portal's feedback forms are multi-question (Text/Radio/Dropdown/
-    Checkbox per createDynamicForm in the app bundle), not a single
-    text+rating pair. This joins every "question: answer" into one text
-    blob, and separately pulls out the first answer that looks like a
-    rating-scale response (matches RATING_VOCAB) for the Rating column.
+    Checkbox per createDynamicForm in the app bundle) — this used to be
+    joined into one flattened text blob per respondent, which read as an
+    unreadable wall of "Question: answer; Question: answer; ..." in a
+    single Sheets cell, and only captured a "Rating" when a form happened
+    to use the word-scale (Excellent/Good/...) vocabulary rather than the
+    numeric 1-5 scale most of these forms actually use. Returning each
+    question separately instead lets the caller emit one Question/Rating
+    row per question, matching the sheet's own columns.
     """
     if not feedback_answer:
-        return "", ""
+        return []
 
-    parts = []
-    rating = ""
+    pairs = []
     for q in questions:
         key = f"question_{q['questionId']}"
         raw_answer = feedback_answer.get(key)
@@ -262,15 +262,5 @@ def flatten_feedback(questions: list[dict], feedback_answer: dict | None) -> tup
             answer_text = str(raw_answer)
 
         if answer_text:
-            parts.append(f"{q['questionText']}: {answer_text}")
-            if not rating and answer_text.strip().lower() in RATING_VOCAB:
-                rating = answer_text.strip()
-
-    feedback_text = "; ".join(parts)
-    # This lands directly in a Sheets cell (50,000-char hard limit) — a form
-    # with many questions or an unusually long free-text answer shouldn't be
-    # able to crash the write the way an unbounded join elsewhere in this
-    # project already has (see sheets_sync.write_run_log).
-    if len(feedback_text) > 45000:
-        feedback_text = feedback_text[:45000] + f"… [truncated, {len(feedback_text)} chars total]"
-    return feedback_text, rating
+            pairs.append((q["questionText"], answer_text))
+    return pairs

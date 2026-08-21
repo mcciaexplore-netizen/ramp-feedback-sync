@@ -6,13 +6,8 @@ __pycache__/
 .venv/
 venv/
 
-# Run artifacts / scraped data — real MCCIA event & feedback content,
-# not source, and not meant for a public repo.
-*.log
-recon_screenshot.png
-live_recon_requests.json
-dry_run_output.json
-dry_run_output.csv
-checkpoint.json
-digest_data.json
-digest_report.html
+# All generated/run artifacts — checkpoints, digests, dry-run output,
+# scrape/launchd logs, screenshots. Real MCCIA event & feedback content,
+# not source, and not meant for a public repo. See output/ in the project
+# layout in README.md.
+output/

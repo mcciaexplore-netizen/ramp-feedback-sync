@@ -22,9 +22,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/launchd_stdout.log</string>
+    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/output/launchd_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/launchd_stderr.log</string>
+    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/output/launchd_stderr.log</string>
 
     <key>RunAtLoad</key>
     <false/>

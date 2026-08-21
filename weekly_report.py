@@ -24,7 +24,6 @@ import os
 import subprocess
 import sys
 import time
-from collections import Counter
 from datetime import datetime, timedelta
 
 from dateutil import parser as dateparser
@@ -71,14 +70,28 @@ def in_report_window(event_date: str, today) -> bool:
     return today - timedelta(days=REPORT_WINDOW_DAYS) <= d <= today
 
 
-def build_week_summary(client: RampClient, week_events: list, errors: list) -> list:
+def build_week_summary(client: RampClient, week_events: list, errors: list):
     """Full feedback + enrolled/attended fetch for this week's events only
-    (expected to be a handful), independent of the Sheets checkpoint."""
+    (expected to be a handful), independent of the Sheets checkpoint.
+
+    Returns (summary_events, feedback_rows): summary_events carries the
+    per-event enrolled/attended/feedback counts for the stat cards;
+    feedback_rows is the flat list of individual (respondent, question)
+    rows that actually have an answer — scrape_event now emits one row per
+    question a respondent answered (see sheets_sync.SCHEMA_COLUMNS), so
+    "how many people gave feedback" is a count of distinct respondents
+    within these rows, not a count of rows. render_email groups these back
+    into one card per person.
+    """
     summary = []
+    feedback_rows = []
     for event in week_events:
         event_id = event.get("eventId") or event.get("uniqueEventId") or "?"
         guid = event.get("uniqueEventId")
         rows = scrape_event(client, event, errors)
+        given_rows = [r for r in rows if r["Question"].strip() and r["Rating"].strip()]
+        feedback_rows.extend(given_rows)
+        respondents_who_gave_feedback = {r.get("Enrollment ID") or r.get("Name") for r in given_rows}
 
         enrolled = attended = None
         if guid:
@@ -91,13 +104,6 @@ def build_week_summary(client: RampClient, week_events: list, errors: list) -> l
             except PersistentFailure as e:
                 errors.append(f"{event_id}: attended count failed ({e})")
 
-        feedback_texts = Counter(r["Feedback"] for r in rows if r["Feedback"].strip())
-        ratings = Counter(r["Rating"].strip() for r in rows if r["Rating"].strip())
-        duplicate_groups = sorted(
-            ({"text": t, "count": c} for t, c in feedback_texts.items() if c > 1),
-            key=lambda d: -d["count"],
-        )
-
         summary.append({
             "eventId": event_id,
             "component": event.get("componentName", ""),
@@ -105,11 +111,9 @@ def build_week_summary(client: RampClient, week_events: list, errors: list) -> l
             "eventDate": event.get("eventDate", ""),
             "enrolled": enrolled,
             "attended": attended,
-            "feedbackCount": len(rows),
-            "ratings": ratings,
-            "topDuplicateFeedback": duplicate_groups[:3],
+            "feedbackCount": len(respondents_who_gave_feedback),
         })
-    return summary
+    return summary, feedback_rows
 
 
 # --- Email rendering -------------------------------------------------------
@@ -136,87 +140,113 @@ def fmt_count(n) -> str:
     return f"{n:,}" if n is not None else "—"
 
 
-def fmt_pct(numer, denom) -> str:
-    if not denom:
-        return "—"
-    return f"{round(100 * numer / denom)}%"
-
-
-def stat_tile(value: str, label: str) -> str:
-    return f"""<td style="padding:14px 10px;text-align:center;border:1px solid {BORDER};background:#fcfcfb;">
-      <div style="font-size:22px;font-weight:800;color:{INK};font-family:Arial,Helvetica,sans-serif;">{esc(value)}</div>
-      <div style="font-size:11px;color:{INK_2};margin-top:4px;font-family:Arial,Helvetica,sans-serif;">{esc(label)}</div>
+def stat_card_html(value, label: str) -> str:
+    """One card in the top stat row — width is a percentage so 5 cards
+    divide the row evenly regardless of email client."""
+    return f"""<td width="20%" style="padding:6px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {BORDER};border-radius:8px;background:#ffffff;">
+        <tr><td align="center" style="padding:16px 6px;">
+          <div style="font-size:19px;font-weight:800;color:{INK};font-family:Arial,Helvetica,sans-serif;line-height:1.2;">{esc(value)}</div>
+          <div style="font-size:10px;color:{MUTED};margin-top:5px;font-family:Arial,Helvetica,sans-serif;text-transform:uppercase;letter-spacing:0.03em;">{esc(label)}</div>
+        </td></tr>
+      </table>
     </td>"""
 
 
-def event_row_html(ev: dict) -> str:
-    enrolled, attended, feedback = ev["enrolled"], ev["attended"], ev["feedbackCount"]
-    attend_pct = fmt_pct(attended, enrolled) if attended is not None else "—"
-    feedback_pct = fmt_pct(feedback, attended) if attended else "—"
-
-    flag, flag_color = "", INK_2
-    if enrolled is None:
-        flag, flag_color = "no data", MUTED
-    elif attended == 0 and enrolled:
-        flag, flag_color = "0 attended", "#d03b3b"
-    elif feedback == 0 and attended:
-        flag, flag_color = "no feedback", WARN
-
+def event_header_html(ev: dict) -> str:
+    """Section header for one event — name + identity, with its own
+    enrolled/attended/feedback line, sitting above that event's feedback
+    cards so each event is visually its own group."""
     date_only = esc(ev["eventDate"]).split(" ")[0]
-    td = f"padding:10px 12px;border-bottom:1px solid {BORDER};font-family:Arial,Helvetica,sans-serif;font-size:13px;"
-    return f"""<tr>
-      <td style="{td}">
-        <div style="font-weight:600;color:{INK};">{esc(ev['eventName'])}</div>
-        <div style="font-size:11px;color:{MUTED};margin-top:2px;">{esc(ev['eventId'])} &middot; {esc(ev['component'])} &middot; {date_only}</div>
-      </td>
-      <td style="{td}text-align:right;">{fmt_count(enrolled)}</td>
-      <td style="{td}text-align:right;">{fmt_count(attended)}</td>
-      <td style="{td}text-align:right;">{attend_pct}</td>
-      <td style="{td}text-align:right;">{fmt_count(feedback)}</td>
-      <td style="{td}text-align:right;">{feedback_pct}</td>
-      <td style="{td}color:{flag_color};font-size:11px;">{esc(flag)}</td>
-    </tr>"""
+    return f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{NAVY};border-radius:8px;margin:0 0 8px;">
+      <tr><td style="padding:12px 16px;">
+        <div style="font-size:14px;font-weight:700;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">{esc(ev['eventName'])}</div>
+        <div style="font-size:11px;color:#ffffff;opacity:0.82;margin-top:3px;font-family:Arial,Helvetica,sans-serif;">{esc(ev['eventId'])} &middot; {date_only} &middot; {fmt_count(ev['enrolled'])} enrolled &middot; {fmt_count(ev['attended'])} attended &middot; {ev['feedbackCount']} feedback</div>
+      </td></tr>
+    </table>"""
 
 
-def render_email(week_label: str, summary_events: list, errors: list, total_synced: int):
+def group_by_respondent(rows: list) -> list:
+    """Fold scrape_event's one-row-per-question rows back into one entry
+    per person: {"name", "eventId", "answers": [(question, rating), ...]}
+    in original order, so the email can show one card per respondent
+    (matching the sheet's own grouping by Enrollment ID, falling back to
+    Name when it's missing)."""
+    people = {}
+    order = []
+    for r in rows:
+        key = (r.get("Event ID"), r.get("Enrollment ID") or r.get("Name"))
+        if key not in people:
+            people[key] = {"name": r.get("Name") or "Anonymous", "eventId": r.get("Event ID"), "answers": []}
+            order.append(key)
+        people[key]["answers"].append((r["Question"], r["Rating"]))
+    return [people[k] for k in order]
+
+
+def person_card_html(person: dict) -> str:
+    """One card per person who gave feedback: their name, then a
+    Question (left) / Rating (right) row for every question they
+    answered — mirrors the sheet's own Question/Rating columns."""
+    qa_rows = "".join(
+        f'<tr>'
+        f'<td style="padding:5px 10px 5px 0;font-size:12px;color:{INK_2};font-family:Arial,Helvetica,sans-serif;'
+        f'vertical-align:top;border-bottom:1px solid {BORDER};">{esc(q)}</td>'
+        f'<td style="padding:5px 0;font-size:12px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;'
+        f'text-align:right;white-space:nowrap;vertical-align:top;border-bottom:1px solid {BORDER};">{esc(a)}</td>'
+        f'</tr>'
+        for q, a in person["answers"]
+    )
+    return f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {BORDER};border-radius:8px;background:#fcfcfb;margin-bottom:8px;">
+      <tr><td style="padding:12px 16px;">
+        <div style="font-size:13px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;margin-bottom:6px;">{esc(person['name'])}</div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{qa_rows}</table>
+      </td></tr>
+    </table>"""
+
+
+def no_feedback_note_html() -> str:
+    return (
+        f'<p style="margin:0 0 8px;padding:12px 16px;color:{MUTED};font-size:12px;'
+        f'font-family:Arial,Helvetica,sans-serif;background:#fcfcfb;border:1px solid {BORDER};'
+        f'border-radius:8px;">No feedback received for this event yet.</p>'
+    )
+
+
+def event_section_html(ev: dict, people_for_event: list) -> str:
+    cards = "".join(person_card_html(p) for p in people_for_event) or no_feedback_note_html()
+    return f'<div style="margin-bottom:20px;">{event_header_html(ev)}{cards}</div>'
+
+
+def render_email(week_label: str, month_label: str, summary_events: list, feedback_rows: list, errors: list, total_synced: int):
     total_events = len(summary_events)
     total_enrolled = sum(e["enrolled"] for e in summary_events if e["enrolled"] is not None)
     total_attended = sum(e["attended"] for e in summary_events if e["attended"] is not None)
-    total_feedback = sum(e["feedbackCount"] for e in summary_events)
 
-    all_ratings = Counter()
-    all_dupes = []
-    for e in summary_events:
-        all_ratings.update(e["ratings"])
-        all_dupes.extend(e["topDuplicateFeedback"])
-    top_dupe = max(all_dupes, key=lambda d: d["count"], default=None)
+    people = group_by_respondent(feedback_rows)
+    total_feedback = len(people)
+
+    cards_html = "".join([
+        stat_card_html(month_label, "Month"),
+        stat_card_html(total_events, "Events Happened"),
+        stat_card_html(fmt_count(total_enrolled), "Enrolled"),
+        stat_card_html(fmt_count(total_attended), "Attended"),
+        stat_card_html(fmt_count(total_feedback), "Gave Feedback"),
+    ])
+
+    people_by_event = {}
+    for p in people:
+        people_by_event.setdefault(p["eventId"], []).append(p)
+    for plist in people_by_event.values():
+        plist.sort(key=lambda p: p["name"])
 
     events_sorted = sorted(summary_events, key=lambda e: e["eventDate"])
-    rows_html = "".join(event_row_html(e) for e in events_sorted) or (
-        f'<tr><td colspan="7" style="padding:20px;text-align:center;color:{MUTED};'
-        f'font-family:Arial,Helvetica,sans-serif;font-size:13px;">No events fell in this window.</td></tr>'
+    events_html = "".join(
+        event_section_html(ev, people_by_event.get(ev["eventId"], [])) for ev in events_sorted
+    ) or (
+        f'<p style="padding:20px;text-align:center;color:{MUTED};'
+        f'font-family:Arial,Helvetica,sans-serif;font-size:13px;margin:0;border:1px solid {BORDER};'
+        f'border-radius:8px;background:#fcfcfb;">No events fell in this window.</p>'
     )
-
-    spotlight_html = ""
-    if top_dupe:
-        snippet = esc(top_dupe["text"][:220]) + ("…" if len(top_dupe["text"]) > 220 else "")
-        spotlight_html += (
-            f'<p style="margin:16px 0 4px;font-weight:700;font-size:13px;color:{INK};'
-            f'font-family:Arial,Helvetica,sans-serif;">Most repeated response ({top_dupe["count"]}&times;)</p>'
-            f'<p style="margin:0;font-style:italic;color:{INK_2};font-size:13px;'
-            f'font-family:Arial,Helvetica,sans-serif;">&ldquo;{snippet}&rdquo;</p>'
-        )
-    if all_ratings:
-        items = "".join(
-            f'<li style="margin-bottom:2px;">{esc(k)}: {v}</li>'
-            for k, v in sorted(all_ratings.items(), key=lambda kv: -kv[1])
-        )
-        spotlight_html += (
-            f'<p style="margin:16px 0 4px;font-weight:700;font-size:13px;color:{INK};'
-            f'font-family:Arial,Helvetica,sans-serif;">Word-scale ratings this week</p>'
-            f'<ul style="margin:0;padding-left:18px;color:{INK_2};font-size:13px;'
-            f'font-family:Arial,Helvetica,sans-serif;">{items}</ul>'
-        )
 
     error_html = ""
     if errors:
@@ -235,31 +265,13 @@ def render_email(week_label: str, summary_events: list, errors: list, total_sync
     <div style="color:#ffffff;opacity:0.8;font-size:12px;margin-top:4px;font-family:Arial,Helvetica,sans-serif;">Week of {esc(week_label)} &middot; Industry Association scope</div>
   </td></tr>
   <tr><td style="padding:20px 24px 4px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="6">
-      <tr>
-        {stat_tile(total_events, "Events this week")}
-        {stat_tile(fmt_count(total_enrolled), "Enrolled")}
-        {stat_tile(fmt_count(total_attended), "Attended")}
-        {stat_tile(fmt_count(total_feedback), "Gave feedback")}
-      </tr>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>{cards_html}</tr>
     </table>
   </td></tr>
-  <tr><td style="padding:8px 24px 20px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {BORDER};">
-      <thead>
-        <tr style="background:#fcfcfb;">
-          <th align="left" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Event</th>
-          <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Enrolled</th>
-          <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Attended</th>
-          <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Attend %</th>
-          <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Feedback</th>
-          <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;color:{MUTED};font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid {BORDER};">Feedback %</th>
-          <th style="padding:10px 12px;border-bottom:1px solid {BORDER};"></th>
-        </tr>
-      </thead>
-      <tbody>{rows_html}</tbody>
-    </table>
-    {spotlight_html}
+  <tr><td style="padding:14px 24px 24px;">
+    <div style="font-size:14px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;margin-bottom:12px;">Events &amp; Feedback This Week</div>
+    {events_html}
     {error_html}
     <p style="margin:20px 0 0;font-size:12px;color:{MUTED};font-family:Arial,Helvetica,sans-serif;">
       {total_synced} new feedback row(s) were synced to the
@@ -273,19 +285,29 @@ def render_email(week_label: str, summary_events: list, errors: list, total_sync
 </body></html>"""
 
     plain_lines = [
-        f"MCCIA RAMP Feedback — Weekly Report — Week of {week_label}",
+        f"MCCIA RAMP Feedback — Weekly Report — Week of {week_label} ({month_label})",
         "",
-        f"Events this week: {total_events}",
+        f"Events Happened: {total_events}",
         f"Enrolled: {fmt_count(total_enrolled)}",
         f"Attended: {fmt_count(total_attended)}",
-        f"Gave feedback: {fmt_count(total_feedback)}",
+        f"Gave Feedback: {fmt_count(total_feedback)}",
         "",
+        "Events & Feedback This Week:",
     ]
-    for e in events_sorted:
+    for ev in events_sorted:
+        date_only = str(ev["eventDate"]).split(" ")[0]
+        plain_lines.append("")
         plain_lines.append(
-            f"- {e['eventName']} ({e['eventId']}): enrolled={fmt_count(e['enrolled'])}, "
-            f"attended={fmt_count(e['attended'])}, feedback={e['feedbackCount']}"
+            f"== {ev['eventName']} ({ev['eventId']}) — {date_only} — "
+            f"{fmt_count(ev['enrolled'])} enrolled, {fmt_count(ev['attended'])} attended, "
+            f"{ev['feedbackCount']} feedback =="
         )
+        for p in people_by_event.get(ev["eventId"], []):
+            plain_lines.append(f"  - {p['name']}:")
+            for q, a in p["answers"]:
+                plain_lines.append(f"      {q}: {a}")
+        if not people_by_event.get(ev["eventId"]):
+            plain_lines.append("  (no feedback received for this event yet)")
     if not events_sorted:
         plain_lines.append("No events fell in this window.")
     plain_lines.append("")
@@ -329,7 +351,7 @@ def _run():
 
         week_events = [e for e in events if in_report_window(e.get("eventDate", ""), today)]
         print(f"{len(week_events)} event(s) fall in the report window (last {REPORT_WINDOW_DAYS} days).")
-        summary_events = build_week_summary(client, week_events, errors)
+        summary_events, feedback_rows = build_week_summary(client, week_events, errors)
 
         done_ids = load_checkpoint()
 
@@ -356,8 +378,9 @@ def _run():
     today_label = today.strftime("%b %d, %Y")
     week_start_label = (today - timedelta(days=REPORT_WINDOW_DAYS)).strftime("%b %d")
     week_label = f"{week_start_label} – {today_label}"
+    month_label = today.strftime("%B %Y")
 
-    html_body, plain_body = render_email(week_label, summary_events, errors, total_added)
+    html_body, plain_body = render_email(week_label, month_label, summary_events, feedback_rows, errors, total_added)
     emailer.send_report_email(
         subject=f"RAMP Feedback — Weekly Report ({week_label})",
         html_body=html_body,

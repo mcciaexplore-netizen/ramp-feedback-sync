@@ -24,6 +24,7 @@ Requires: pip install -r requirements.txt && playwright install chromium
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -71,7 +72,8 @@ def browser_recon():
         local_storage = page.evaluate("() => JSON.stringify(localStorage)")
         title = page.title()
         body_text = page.inner_text("body")[:500]
-        page.screenshot(path="recon_screenshot.png", full_page=True)
+        os.makedirs("output", exist_ok=True)
+        page.screenshot(path="output/recon_screenshot.png", full_page=True)
 
         browser.close()
 
@@ -161,7 +163,7 @@ def write_recon_md(browser_result, api_results):
         "\nThe app does not even attempt an anonymous data fetch — it "
         "renders the login screen (username/password + role selector for "
         "MSME/IA/MSSIDC/DIC + **CAPTCHA**) before any event or feedback "
-        "data is requested. Screenshot saved as `recon_screenshot.png`.\n"
+        "data is requested. Screenshot saved as `output/recon_screenshot.png`.\n"
     )
     lines.append("Body text of the landing page (truncated):\n```")
     lines.append(browser_result["body_snippet"])

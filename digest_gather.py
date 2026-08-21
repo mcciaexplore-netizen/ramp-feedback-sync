@@ -162,16 +162,17 @@ def main():
         month_summary["ratingDistribution"] = dict(month_summary["ratingDistribution"])
         result["months"][month] = month_summary
 
-    with open("digest_data.json", "w") as f:
+    os.makedirs("output", exist_ok=True)
+    with open("output/digest_data.json", "w") as f:
         json.dump(result, f, indent=2)
 
-    print(f"\nWrote digest_data.json. {len(errors)} error(s).")
+    print(f"\nWrote output/digest_data.json. {len(errors)} error(s).")
     if errors:
-        with open("run.log", "a") as f:
+        with open("output/run.log", "a") as f:
             f.write(f"\n=== Digest gather at {datetime.now(timezone.utc).isoformat()} ({len(errors)} errors) ===\n")
             for e in errors:
                 f.write(f"{e}\n")
-        print("Error details appended to run.log")
+        print("Error details appended to output/run.log")
 
 
 if __name__ == "__main__":

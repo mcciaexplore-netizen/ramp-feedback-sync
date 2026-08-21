@@ -23,11 +23,12 @@ import time
 from dotenv import load_dotenv
 
 import auth
-from source_client import RampClient, PersistentFailure, flatten_feedback
+from source_client import RampClient, PersistentFailure, answers_by_question
 from sheets_sync import SheetsSync, normalize_row, SCHEMA_COLUMNS
 
 
-CHECKPOINT_FILE = "checkpoint.json"
+OUTPUT_DIR = "output"
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "checkpoint.json")
 
 
 def load_checkpoint() -> set:
@@ -43,6 +44,7 @@ def load_checkpoint() -> set:
 
 
 def save_checkpoint(done_ids: set):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(CHECKPOINT_FILE, "w") as f:
         json.dump(sorted(done_ids), f)
 
@@ -56,7 +58,16 @@ def run_recon():
 def scrape_event(client: RampClient, event: dict, errors: list) -> list:
     """Fetch every feedback row for one event. Appends to `errors` in place
     and returns whatever rows it managed to build rather than raising, so a
-    problem with one event never stops the run."""
+    problem with one event never stops the run.
+
+    One row per (respondent, question) — a respondent who answered 10
+    questions produces 10 rows, each with that question's own text next to
+    their own answer, rather than one row with everything mashed together
+    (see sheets_sync.SCHEMA_COLUMNS). A respondent who answered nothing
+    (missing enrollment id, or a detail call that returned no answers)
+    still gets exactly one row with a blank Question/Rating, so the sheet
+    still reflects that they were on the feedback roster.
+    """
     event_id = event.get("eventId") or event.get("uniqueEventId") or "?"
     unique_event_id = event.get("uniqueEventId")
     if not unique_event_id:
@@ -83,24 +94,31 @@ def scrape_event(client: RampClient, event: dict, errors: list) -> list:
 
         try:
             detail = client.get_feedback_detail(udyam, resp_event_id, enrollment_id)
-            feedback_text, rating = flatten_feedback(detail["questions"], detail["feedback_answer"])
+            qa_pairs = answers_by_question(detail["questions"], detail["feedback_answer"])
         except PersistentFailure as e:
             errors.append(f"Event {event_id}, respondent {udyam or enrollment_id}: {e}")
-            feedback_text, rating = "", ""
+            qa_pairs = []
 
-        rows.append(normalize_row(event, resp, feedback_text, rating))
+        if qa_pairs:
+            for question_text, answer_text in qa_pairs:
+                rows.append(normalize_row(event, resp, question_text, answer_text))
+        else:
+            rows.append(normalize_row(event, resp, "", ""))
 
     return rows
 
 
 def write_dry_run_output(rows):
-    with open("dry_run_output.json", "w") as f:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    json_path = os.path.join(OUTPUT_DIR, "dry_run_output.json")
+    csv_path = os.path.join(OUTPUT_DIR, "dry_run_output.csv")
+    with open(json_path, "w") as f:
         json.dump(rows, f, indent=2)
-    with open("dry_run_output.csv", "w", newline="") as f:
+    with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SCHEMA_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nWrote {len(rows)} row(s) to dry_run_output.json and dry_run_output.csv")
+    print(f"\nWrote {len(rows)} row(s) to {json_path} and {csv_path}")
 
 
 def main():

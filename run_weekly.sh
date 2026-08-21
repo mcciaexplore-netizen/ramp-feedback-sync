@@ -5,5 +5,6 @@
 # and log redirection are all in one obvious place.
 set -euo pipefail
 cd "$(dirname "$0")"
+mkdir -p output
 source venv/bin/activate
-python weekly_report.py >> weekly_report_output.log 2>&1
+python weekly_report.py >> output/weekly_report_output.log 2>&1
