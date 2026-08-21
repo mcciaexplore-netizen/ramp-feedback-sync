@@ -1,0 +1,18 @@
+.env
+service-account.json
+*.json.key
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Run artifacts / scraped data — real MCCIA event & feedback content,
+# not source, and not meant for a public repo.
+*.log
+recon_screenshot.png
+live_recon_requests.json
+dry_run_output.json
+dry_run_output.csv
+checkpoint.json
+digest_data.json
+digest_report.html
