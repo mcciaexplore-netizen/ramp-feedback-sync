@@ -75,12 +75,11 @@ def build_week_summary(client: RampClient, week_events: list, errors: list):
     (expected to be a handful), independent of the Sheets checkpoint.
 
     Returns (summary_events, feedback_rows): summary_events carries the
-    per-event enrolled/attended/feedback counts for the stat cards;
+    per-event enrolled/attended/feedback counts shown in the email;
     feedback_rows is the flat list of individual respondent rows that
-    actually contain feedback — one per person, for the per-feedback
-    cards in the email. A respondent who's merely on the feedback roster
-    with nothing filled in doesn't count as "gave feedback" and isn't
-    listed.
+    actually contain feedback, used only to compute the total feedback
+    count. A respondent who's merely on the feedback roster with nothing
+    filled in doesn't count as "gave feedback".
     """
     summary = []
     feedback_rows = []
@@ -159,38 +158,13 @@ def event_header_html(ev: dict) -> str:
     return f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{NAVY};border-radius:8px;margin:0 0 8px;">
       <tr><td style="padding:12px 16px;">
         <div style="font-size:14px;font-weight:700;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">{esc(ev['eventName'])}</div>
-        <div style="font-size:11px;color:#ffffff;opacity:0.82;margin-top:3px;font-family:Arial,Helvetica,sans-serif;">{esc(ev['eventId'])} &middot; {date_only} &middot; {fmt_count(ev['enrolled'])} enrolled &middot; {fmt_count(ev['attended'])} attended &middot; {ev['feedbackCount']} feedback</div>
+        <div style="font-size:11px;color:#ffffff;opacity:0.82;margin-top:3px;font-family:Arial,Helvetica,sans-serif;">{esc(ev['eventId'])} &middot; {date_only} &middot; {fmt_count(ev['enrolled'])} registered &middot; {fmt_count(ev['attended'])} attended &middot; {ev['feedbackCount']} feedback</div>
       </td></tr>
     </table>"""
 
 
-def feedback_card_html(row: dict) -> str:
-    """One card per person who actually gave feedback: their name, then
-    their Feedback text as-is — same newline-per-question content as the
-    sheet's own Feedback cell, so the email and the sheet read the same
-    way. white-space:pre-line renders those newlines as real line breaks
-    without needing to re-parse "Question: Answer" back apart."""
-    name = esc(row.get("Name") or "Anonymous")
-    feedback_text = esc(row.get("Feedback") or "(no written feedback)")
-    return f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {BORDER};border-radius:8px;background:#fcfcfb;margin-bottom:8px;">
-      <tr><td style="padding:12px 16px;">
-        <div style="font-size:13px;font-weight:700;color:{INK};font-family:Arial,Helvetica,sans-serif;margin-bottom:6px;">{name}</div>
-        <div style="font-size:12px;color:{INK_2};line-height:1.6;font-family:Arial,Helvetica,sans-serif;white-space:pre-line;">{feedback_text}</div>
-      </td></tr>
-    </table>"""
-
-
-def no_feedback_note_html() -> str:
-    return (
-        f'<p style="margin:0 0 8px;padding:12px 16px;color:{MUTED};font-size:12px;'
-        f'font-family:Arial,Helvetica,sans-serif;background:#fcfcfb;border:1px solid {BORDER};'
-        f'border-radius:8px;">No feedback received for this event yet.</p>'
-    )
-
-
-def event_section_html(ev: dict, rows_for_event: list) -> str:
-    cards = "".join(feedback_card_html(r) for r in rows_for_event) or no_feedback_note_html()
-    return f'<div style="margin-bottom:20px;">{event_header_html(ev)}{cards}</div>'
+def event_section_html(ev: dict) -> str:
+    return f'<div style="margin-bottom:20px;">{event_header_html(ev)}</div>'
 
 
 def render_email(week_label: str, month_label: str, summary_events: list, feedback_rows: list, errors: list, total_synced: int):
@@ -203,20 +177,14 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
     cards_html = "".join([
         stat_card_html(month_label, "Month"),
         stat_card_html(total_events, "Events Happened"),
-        stat_card_html(fmt_count(total_enrolled), "Enrolled"),
+        stat_card_html(fmt_count(total_enrolled), "Registered"),
         stat_card_html(fmt_count(total_attended), "Attended"),
         stat_card_html(fmt_count(total_feedback), "Gave Feedback"),
     ])
 
-    rows_by_event = {}
-    for r in feedback_rows:
-        rows_by_event.setdefault(r.get("Event ID", ""), []).append(r)
-    for rows in rows_by_event.values():
-        rows.sort(key=lambda r: r.get("Name", ""))
-
     events_sorted = sorted(summary_events, key=lambda e: e["eventDate"])
     events_html = "".join(
-        event_section_html(ev, rows_by_event.get(ev["eventId"], [])) for ev in events_sorted
+        event_section_html(ev) for ev in events_sorted
     ) or (
         f'<p style="padding:20px;text-align:center;color:{MUTED};'
         f'font-family:Arial,Helvetica,sans-serif;font-size:13px;margin:0;border:1px solid {BORDER};'
@@ -263,7 +231,7 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
         f"MCCIA RAMP Feedback — Weekly Report — Week of {week_label} ({month_label})",
         "",
         f"Events Happened: {total_events}",
-        f"Enrolled: {fmt_count(total_enrolled)}",
+        f"Registered: {fmt_count(total_enrolled)}",
         f"Attended: {fmt_count(total_attended)}",
         f"Gave Feedback: {fmt_count(total_feedback)}",
         "",
@@ -274,15 +242,9 @@ def render_email(week_label: str, month_label: str, summary_events: list, feedba
         plain_lines.append("")
         plain_lines.append(
             f"== {ev['eventName']} ({ev['eventId']}) — {date_only} — "
-            f"{fmt_count(ev['enrolled'])} enrolled, {fmt_count(ev['attended'])} attended, "
+            f"{fmt_count(ev['enrolled'])} registered, {fmt_count(ev['attended'])} attended, "
             f"{ev['feedbackCount']} feedback =="
         )
-        for r in rows_by_event.get(ev["eventId"], []):
-            plain_lines.append(f"  - {r.get('Name') or 'Anonymous'}:")
-            for line in (r.get("Feedback") or "").split("\n"):
-                plain_lines.append(f"      {line}")
-        if not rows_by_event.get(ev["eventId"]):
-            plain_lines.append("  (no feedback received for this event yet)")
     if not events_sorted:
         plain_lines.append("No events fell in this window.")
     plain_lines.append("")
@@ -356,6 +318,7 @@ def _run():
     month_label = today.strftime("%B %Y")
 
     html_body, plain_body = render_email(week_label, month_label, summary_events, feedback_rows, errors, total_added)
+    sync.write_weekly_report(week_label, month_label, summary_events, errors, html_body, plain_body)
     emailer.send_report_email(
         subject=f"RAMP Feedback — Weekly Report ({week_label})",
         html_body=html_body,

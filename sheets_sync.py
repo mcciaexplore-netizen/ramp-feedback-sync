@@ -12,6 +12,7 @@ holds run history, same as before.
 """
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -53,6 +54,7 @@ COLUMN_WIDTHS = [110, 160, 220, 110, 100, 110, 160, 120, 200, 120, 420, 170]
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 OVERVIEW_SHEET = "Overview"
+WEEKLY_REPORTS_SHEET = "Weekly Reports"
 
 HEADER_COLOR = {"red": 0.11, "green": 0.27, "blue": 0.53}  # dark blue
 BAND_COLOR = {"red": 0.94, "green": 0.96, "blue": 1.0}  # very light blue
@@ -394,4 +396,47 @@ class SheetsSync:
             events_scanned,
             new_rows,
             error_summary,
+        ], value_input_option="USER_ENTERED")
+
+    def write_weekly_report(self, week_label: str, month_label: str, summary_events: list[dict],
+                             errors: list[str], html_body: str, plain_body: str):
+        """Append one row to the Weekly Reports tab: this week's event
+        numbers plus an exact archive of the email that was sent, so a past
+        week's report can be looked up later without digging through
+        inboxes. Both the structured numbers (Summary JSON) and the
+        rendered email (Email HTML / Email Text) are kept, each capped
+        through _capped like every other variable-length cell in this
+        file."""
+        timestamp = datetime.now(timezone.utc).isoformat()
+        total_events = len(summary_events)
+        total_enrolled = sum(e["enrolled"] for e in summary_events if e["enrolled"] is not None)
+        total_attended = sum(e["attended"] for e in summary_events if e["attended"] is not None)
+        total_feedback = sum(e["feedbackCount"] for e in summary_events)
+
+        error_summary = "; ".join(errors[:5])
+        if len(errors) > 5:
+            error_summary += f" …and {len(errors) - 5} more"
+        error_summary = _capped(error_summary, ERROR_SUMMARY_CHAR_LIMIT)
+
+        header = [
+            "Timestamp", "Week", "Month", "Events", "Registered", "Attended",
+            "Feedback", "Errors", "Summary JSON", "Email HTML", "Email Text",
+        ]
+        try:
+            ws = self.spreadsheet.worksheet(WEEKLY_REPORTS_SHEET)
+        except gspread.WorksheetNotFound:
+            ws = self.spreadsheet.add_worksheet(WEEKLY_REPORTS_SHEET, rows=1000, cols=len(header))
+            _with_retry(ws.append_row, header)
+            _with_retry(ws.format, "A1:K1", {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                "backgroundColor": HEADER_COLOR,
+            })
+            _with_retry(ws.freeze, rows=1)
+
+        _with_retry(ws.append_row, [
+            timestamp, week_label, month_label, total_events, total_enrolled,
+            total_attended, total_feedback, error_summary,
+            _capped(json.dumps(summary_events), CELL_CHAR_LIMIT),
+            _capped(html_body, CELL_CHAR_LIMIT),
+            _capped(plain_body, CELL_CHAR_LIMIT),
         ], value_input_option="USER_ENTERED")
