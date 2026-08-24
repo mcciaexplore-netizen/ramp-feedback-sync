@@ -12,6 +12,7 @@ import os
 
 from dotenv import load_dotenv
 
+from auth import LOGIN_URL
 from emailer import send_report_email
 
 SUBJECT = "RAMP Weekly Report — log in at 11:00"
@@ -23,7 +24,9 @@ PLAIN_BODY = (
     "login. Pick the MSSIDC role, enter your username/password, and "
     "solve the CAPTCHA as soon as it appears — the run waits up to 30 "
     "minutes, but the sooner you log in, the sooner this week's feedback "
-    "digest goes out.\n"
+    "digest goes out.\n\n"
+    f"RAMP login (opens in your own browser, just a shortcut — the actual "
+    f"automated login happens in the Chromium window at 11:00): {LOGIN_URL}\n"
 )
 
 HTML_BODY = f"""\
@@ -34,6 +37,9 @@ login. Pick the <strong>MSSIDC</strong> role, enter your username/password,
 and solve the CAPTCHA as soon as it appears — the run waits up to 30
 minutes, but the sooner you log in, the sooner this week's feedback
 digest goes out.</p>
+<p><a href="{LOGIN_URL}">{LOGIN_URL}</a><br>
+<span style="color:#666;font-size:12px;">(shortcut to the RAMP login page —
+the actual automated login still happens in the Chromium window at 11:00)</span></p>
 """
 
 

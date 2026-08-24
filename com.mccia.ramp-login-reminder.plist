@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/run_reminder.sh</string>
+        <string>/Users/sujalchoudhari/Projects/ramp-feedback-sync/run_reminder.sh</string>
     </array>
 
     <key>StartCalendarInterval</key>
@@ -22,9 +22,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/output/reminder_launchd_stdout.log</string>
+    <string>/Users/sujalchoudhari/Projects/ramp-feedback-sync/output/reminder_launchd_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/sujalchoudhari/Desktop/FEEDBACK MSSCID/ramp-feedback-sync/output/reminder_launchd_stderr.log</string>
+    <string>/Users/sujalchoudhari/Projects/ramp-feedback-sync/output/reminder_launchd_stderr.log</string>
 
     <key>RunAtLoad</key>
     <false/>
