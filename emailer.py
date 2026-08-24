@@ -36,16 +36,17 @@ def _require_env(name: str) -> str:
     return value
 
 
-def send_report_email(subject: str, html_body: str, plain_fallback: str) -> None:
+def send_report_email(subject: str, html_body: str, plain_fallback: str, recipients_env: str = "REPORT_RECIPIENTS") -> None:
     """Send one HTML email (with a plain-text fallback part) to every
-    address in REPORT_RECIPIENTS, authenticated as SMTP_USER via an App
-    Password. Raises EmailConfigError if the env isn't configured, or
-    smtplib's own exceptions on a send failure — callers should let a send
-    failure surface loudly rather than silently skip the week's report.
+    address in the env var named by recipients_env (REPORT_RECIPIENTS by
+    default), authenticated as SMTP_USER via an App Password. Raises
+    EmailConfigError if the env isn't configured, or smtplib's own
+    exceptions on a send failure — callers should let a send failure
+    surface loudly rather than silently skip the report.
     """
     sender = _require_env("SMTP_USER")
     app_password = _require_env("SMTP_APP_PASSWORD")
-    recipients_raw = _require_env("REPORT_RECIPIENTS")
+    recipients_raw = _require_env(recipients_env)
     recipients = [addr.strip() for addr in recipients_raw.split(",") if addr.strip()]
     if not recipients:
         raise EmailConfigError("REPORT_RECIPIENTS is set but contains no valid addresses.")
