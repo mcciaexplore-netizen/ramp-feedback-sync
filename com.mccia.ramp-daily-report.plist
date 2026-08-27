@@ -3,20 +3,18 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mccia.ramp-weekly-report</string>
+    <string>com.mccia.ramp-daily-report</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/sujalchoudhari/Projects/ramp-feedback-sync/run_weekly.sh</string>
+        <string>/Users/sujalchoudhari/Projects/ramp-feedback-sync/run_daily.sh</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Weekday</key>
-        <integer>1</integer>
         <key>Hour</key>
-        <integer>11</integer>
+        <integer>23</integer>
         <key>Minute</key>
         <integer>0</integer>
     </dict>

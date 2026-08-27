@@ -1,5 +1,5 @@
 """
-Sends the weekly report by email via SMTP — aistudio@mcciapune.com is a
+Sends the daily digest by email via SMTP — aistudio@mcciapune.com is a
 Zoho Mail account, so this defaults to Zoho's SMTP (smtp.zoho.in:465,
 India cluster — see .env.example if that turns out to be the wrong
 regional cluster for this account). Both are overridable via SMTP_HOST /

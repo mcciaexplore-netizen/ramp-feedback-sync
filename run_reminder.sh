@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wrapper the LaunchAgent (com.mccia.ramp-login-reminder.plist) calls every
-# Monday at 10:50 — ten minutes before com.mccia.ramp-weekly-report.plist
+# Nightly at 22:50 IST — ten minutes before com.mccia.ramp-daily-report.plist
 # opens the RAMP login window.
 set -euo pipefail
 cd "$(dirname "$0")"

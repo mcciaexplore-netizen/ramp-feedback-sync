@@ -22,6 +22,22 @@ Confidence levels:
   shape (`{status, data, totalRecords}`) confirmed via
   VeiwenrolledmsmeComponent / ViewattendedmsmeComponent's own loadData()
   in the app bundle, but never exercised against a live response.
+- Full enrolled MSME list (same `enrolledmsmelistforia` endpoint, now
+  paginated for real rows instead of just `totalRecords`): HIGH — row
+  field names (`udyamNumber`, `nameOfEnterprise`, `userName`,
+  `userMobileNo`, `userEmail`, `status`) confirmed via
+  VeiwenrolledmsmeComponent's own `displayedColumns` + template bindings,
+  and values were verified against live events. The live `status` value is
+  `RAMP Registration`, so it is registration provenance and is not used as
+  a post-event completion signal.
+- Event documents / "View Document" section
+  (`industryassociation/geteventiadocuments` — note this is a different
+  endpoint from the similarly-named `getiaeventdocumentslist`, which the
+  View Document screen does NOT call): HIGH — endpoint, DTO shape, and
+  row fields (`documentName`, `documentType`, `createdDate`) confirmed via
+  VieweventdocumentsComponent's own `loadEventIADocemntDetails()` and
+  template bindings and live responses. The two required document types
+  are `EventImages` and `EventAttendance`.
 
 All calls require the Bearer token from a human-completed login (auth.py).
 This client does not attempt to authenticate on its own.
@@ -39,6 +55,7 @@ RESPONDENTS_ENDPOINT = "industryassociation/viewfeedback"
 FEEDBACK_DETAIL_ENDPOINT = "msme/getmsmecustomfeedbackquestion"
 ENROLLED_ENDPOINT = "industryassociation/enrolledmsmelistforia"  # behind /viewEnrolledParticipants/:eventid
 ATTENDED_ENDPOINT = "industryassociation/attendedmsmelistforia"  # behind /viewAttendedParticipants/:eventid
+EVENT_DOCUMENTS_ENDPOINT = "industryassociation/geteventiadocuments"  # behind /vieweventdocuments/:eventid ("View Document")
 
 
 class PersistentFailure(Exception):
@@ -159,6 +176,69 @@ class RampClient:
                 break
             page += 1
         return respondents
+
+    def get_enrolled_msmes(self, unique_event_id: str, page_size: int = 100) -> list[dict]:
+        """Enumerate every MSME enrolled for one event, paginating — the
+        full rows behind the IA "/viewEnrolledParticipants/:eventid" screen
+        (VeiwenrolledmsmeComponent), not just the totalRecords count
+        get_enrolled_count returns. Post-event completion is determined
+        from the existing Google Sheet, not this endpoint's registration
+        `status` field."""
+        rows = []
+        page = 1
+        while True:
+            dto = {
+                "UniqueEventId": unique_event_id,
+                "PageNumber": page,
+                "PageSize": page_size,
+                "SortColumn": "",
+                "SortDirection": "",
+                "SearchTerm": "",
+                "SearchCol": "",
+            }
+            result = self._get(ENROLLED_ENDPOINT, dto)
+            if not result.get("status"):
+                raise PersistentFailure(
+                    result.get("message", "enrolled MSME list returned status=false")
+                )
+            page_data = result.get("data") or []
+            rows.extend(page_data)
+            total = _as_int(result.get("totalRecords"), default=len(rows))
+            if len(page_data) < page_size or len(rows) >= total:
+                break
+            page += 1
+        return rows
+
+    def get_event_documents(self, unique_event_id: str, page_size: int = 100) -> list[dict]:
+        """Enumerate every document uploaded for one event, paginating —
+        behind the IA "View Document" screen
+        (/vieweventdocuments/:eventid, VieweventdocumentsComponent). Each
+        row carries a `documentType` field used by post_event_checks.py to
+        check for event photos and attendance-sheet photos separately."""
+        rows = []
+        page = 1
+        while True:
+            dto = {
+                "UniqueEventId": unique_event_id,
+                "PageNumber": page,
+                "PageSize": page_size,
+                "SortColumn": "",
+                "SortDirection": "",
+                "SearchTerm": "",
+                "SearchCol": "",
+            }
+            result = self._get(EVENT_DOCUMENTS_ENDPOINT, dto)
+            if not result.get("status"):
+                raise PersistentFailure(
+                    result.get("message", "event documents list returned status=false")
+                )
+            page_data = result.get("data") or []
+            rows.extend(page_data)
+            total = _as_int(result.get("totalRecords"), default=len(rows))
+            if len(page_data) < page_size or len(rows) >= total:
+                break
+            page += 1
+        return rows
 
     def get_enrolled_count(self, unique_event_id: str) -> int:
         """How many MSMEs enrolled for one event — behind the IA

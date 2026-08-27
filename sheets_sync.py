@@ -54,7 +54,19 @@ COLUMN_WIDTHS = [110, 160, 220, 110, 100, 110, 160, 120, 200, 120, 420, 170]
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 OVERVIEW_SHEET = "Overview"
-WEEKLY_REPORTS_SHEET = "Weekly Reports"
+WEEKLY_REPORTS_SHEET = "Weekly Reports"  # historical archive from the old Monday schedule — left untouched, no longer written to
+DAILY_REPORTS_SHEET = "Daily Reports"
+
+# Resolved against each live worksheet header at runtime. ``Feedback`` is the
+# field present in the current workbook; the earlier names make a future
+# explicit post-event column take precedence without silently reading the
+# wrong field.
+POST_EVENT_COMPLETION_COLUMNS = (
+    "Post-event Data",
+    "Post-event Data Entry",
+    "Data Entry Status",
+    "Feedback",
+)
 
 HEADER_COLOR = {"red": 0.11, "green": 0.27, "blue": 0.53}  # dark blue
 BAND_COLOR = {"red": 0.94, "green": 0.96, "blue": 1.0}  # very light blue
@@ -75,6 +87,23 @@ def _capped(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"… [truncated, {len(text)} chars total]"
+
+
+def _normalized_header(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def _find_header(header: list[str], candidates: tuple[str, ...], required: bool = True):
+    by_normalized = {_normalized_header(value): (index, value) for index, value in enumerate(header)}
+    for candidate in candidates:
+        match = by_normalized.get(_normalized_header(candidate))
+        if match:
+            return match
+    if required:
+        raise ValueError(
+            f"Sheet schema is missing one of {candidates}; actual headers: {header}"
+        )
+    return None
 
 
 def _with_retry(fn, *args, retries=4, base_delay=2, **kwargs):
@@ -321,6 +350,59 @@ class SheetsSync:
             total_added += len(new_rows)
         return total_added
 
+    def read_post_event_rows(self, events: list[dict]) -> dict[str, list[dict]]:
+        """Read the existing Sheet field that tracks post-event completion.
+
+        Only month worksheets needed by ``events`` are fetched. Headers are
+        resolved case/punctuation-insensitively instead of assuming column
+        positions. The returned rows contain the shared participant identity
+        fields plus the discovered completion value for post_event_checks.py.
+        A schema mismatch fails loudly rather than turning every participant
+        into a misleading pending item.
+        """
+        wanted_months = {derive_month(event.get("eventDate", "")) for event in events}
+        wanted_months.discard("")
+        available = {worksheet.title for worksheet in self.spreadsheet.worksheets()}
+        month_titles = sorted(wanted_months & available)
+        if not month_titles:
+            return {}
+
+        ranges = [f"'{title.replace(chr(39), chr(39) * 2)}'!A:Z" for title in month_titles]
+        response = _with_retry(self.spreadsheet.values_batch_get, ranges)
+        rows_by_event = defaultdict(list)
+
+        for title, value_range in zip(month_titles, response.get("valueRanges", [])):
+            values = value_range.get("values") or []
+            if not values:
+                continue
+            header = values[0]
+            event_col, _ = _find_header(header, ("Event ID", "EventId"))
+            name_col, _ = _find_header(header, ("Name", "Participant Name"))
+            mobile_col, _ = _find_header(header, ("Mobile Number", "Mobile"))
+            email_col, _ = _find_header(header, ("Email", "Email Address"))
+            completion_col, completion_name = _find_header(
+                header,
+                POST_EVENT_COMPLETION_COLUMNS,
+            )
+
+            def value(row, index):
+                return row[index] if index < len(row) else ""
+
+            for row in values[1:]:
+                event_id = str(value(row, event_col)).strip()
+                if not event_id:
+                    continue
+                rows_by_event[event_id].append({
+                    "name": value(row, name_col),
+                    "mobile": value(row, mobile_col),
+                    "email": value(row, email_col),
+                    "completion_column": completion_name,
+                    "completion_value": value(row, completion_col),
+                    "worksheet": title,
+                })
+
+        return dict(rows_by_event)
+
     def replace_month(self, month: str, rows: list[dict]) -> int:
         """Clear one worksheet and rewrite it from scratch with a fresh row
         set — unlike sync(), which only appends rows not already present,
@@ -350,7 +432,12 @@ class SheetsSync:
         ws = self._get_or_create(OVERVIEW_SHEET)
         month_sheets = [
             s for s in self.spreadsheet.worksheets()
-            if s.title not in (OVERVIEW_SHEET, "RunLog")
+            if s.title not in (
+                OVERVIEW_SHEET,
+                "RunLog",
+                WEEKLY_REPORTS_SHEET,
+                DAILY_REPORTS_SHEET,
+            )
         ]
         rows = [["Month", "Feedback Rows", "Last Updated"]]
         now = datetime.now(timezone.utc).isoformat()
@@ -398,12 +485,13 @@ class SheetsSync:
             error_summary,
         ], value_input_option="USER_ENTERED")
 
-    def write_weekly_report(self, week_label: str, month_label: str, summary_events: list[dict],
-                             errors: list[str], html_body: str, plain_body: str):
-        """Append one row to the Weekly Reports tab: this week's event
-        numbers plus an exact archive of the email that was sent, so a past
-        week's report can be looked up later without digging through
-        inboxes. Both the structured numbers (Summary JSON) and the
+    def write_daily_report(self, run_date_label: str, month_label: str, summary_events: list[dict],
+                            pending_items: list[dict], errors: list[str], html_body: str, plain_body: str):
+        """Upsert one row in Daily Reports: that day's event
+        numbers, the post-event pending-items count, plus an exact archive
+        of the digest email that was sent, so a past day's report can be
+        looked up later without digging through inboxes. Both the
+        structured numbers (Summary JSON / Pending Items JSON) and the
         rendered email (Email HTML / Email Text) are kept, each capped
         through _capped like every other variable-length cell in this
         file."""
@@ -419,24 +507,50 @@ class SheetsSync:
         error_summary = _capped(error_summary, ERROR_SUMMARY_CHAR_LIMIT)
 
         header = [
-            "Timestamp", "Week", "Month", "Events", "Registered", "Attended",
-            "Feedback", "Errors", "Summary JSON", "Email HTML", "Email Text",
+            "Timestamp", "Date", "Month", "Events", "Registered", "Attended",
+            "Feedback", "Pending Events", "Errors", "Summary JSON",
+            "Pending Items JSON", "Email HTML", "Email Text",
         ]
         try:
-            ws = self.spreadsheet.worksheet(WEEKLY_REPORTS_SHEET)
+            ws = self.spreadsheet.worksheet(DAILY_REPORTS_SHEET)
         except gspread.WorksheetNotFound:
-            ws = self.spreadsheet.add_worksheet(WEEKLY_REPORTS_SHEET, rows=1000, cols=len(header))
+            ws = self.spreadsheet.add_worksheet(DAILY_REPORTS_SHEET, rows=1000, cols=len(header))
             _with_retry(ws.append_row, header)
-            _with_retry(ws.format, "A1:K1", {
+            last_col = gspread.utils.rowcol_to_a1(1, len(header)).rstrip("1")
+            _with_retry(ws.format, f"A1:{last_col}1", {
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
                 "backgroundColor": HEADER_COLOR,
             })
             _with_retry(ws.freeze, rows=1)
 
-        _with_retry(ws.append_row, [
-            timestamp, week_label, month_label, total_events, total_enrolled,
-            total_attended, total_feedback, error_summary,
+        report_row = [
+            timestamp, run_date_label, month_label, total_events, total_enrolled,
+            total_attended, total_feedback, len(pending_items), error_summary,
             _capped(json.dumps(summary_events), CELL_CHAR_LIMIT),
+            _capped(json.dumps(pending_items), CELL_CHAR_LIMIT),
             _capped(html_body, CELL_CHAR_LIMIT),
             _capped(plain_body, CELL_CHAR_LIMIT),
-        ], value_input_option="USER_ENTERED")
+        ]
+
+        # Idempotent archive: a second run on the same IST date replaces the
+        # existing report row rather than appending a duplicate.
+        values = _with_retry(ws.get_all_values)
+        existing_row = None
+        if values and values[0]:
+            date_index = values[0].index("Date") if "Date" in values[0] else None
+            if date_index is not None:
+                for row_number, row in enumerate(values[1:], start=2):
+                    if date_index < len(row) and row[date_index] == run_date_label:
+                        existing_row = row_number
+                        break
+
+        if existing_row is None:
+            _with_retry(ws.append_row, report_row, value_input_option="USER_ENTERED")
+        else:
+            last_col = gspread.utils.rowcol_to_a1(1, len(header)).rstrip("1")
+            _with_retry(
+                ws.update,
+                [report_row],
+                range_name=f"A{existing_row}:{last_col}{existing_row}",
+                value_input_option="USER_ENTERED",
+            )
